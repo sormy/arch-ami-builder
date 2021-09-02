@@ -34,7 +34,7 @@ AMI images, then they are available
 2. Sideload bootstrap script:
 
     ```sh
-    ./arch-sideload.sh ec2-user@ec2-hostname
+    ./arch-ami-sideload.sh ec2-user@ec2-hostname
     ```
 
 3. You will need to trigger phases 1-3:
