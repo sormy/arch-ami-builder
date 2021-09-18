@@ -43,3 +43,5 @@ resize2fs -f /dev/nvme0n1p1
 7. [x] set ELIB_VERBOSE=false for ssh mode ???
 
 8. Make final phase of ec2-init provisioning to print to serial as well
+
+9. Add amd64 support
