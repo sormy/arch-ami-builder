@@ -3,8 +3,8 @@
 # global: ELIB_VERBOSE=true|false (default: true)
 # global: ELIB_COLORS=true|false|auto (default: auto)
 
-EECHO_PREFIX=">>>"
-EECHO_SUFFIX=""
+EINFO_PREFIX=">>>"
+EINFO_SUFFIX=""
 EERROR_PREFIX="!!!"
 EERROR_SUFFIX=""
 
@@ -15,21 +15,27 @@ fi
 
 # if colors configuration is unknown then try to detect it
 if [ -z "$ELIB_COLORS" ] || [ "$ELIB_COLORS" = "auto" ]; then
-    ELIB_COLORS=$([ -t 1 ] && echo true || echo false)
+    if [ -t 1 ]; then
+        ELIB_COLORS="true"
+    else
+        ELIB_COLORS="false"
+    fi
 fi
 
-# set colors based on tput (if tty is available)
-if tty -s && [ "$ELIB_COLORS" = "true" ]; then
+# set colors based on tput (if terminal supports colors)
+if tput colors &>/dev/null \
+    && [ "$ELIB_COLORS" = "true" ]
+then
     # https://linux.101hacks.com/ps1-examples/prompt-color-using-tput/
-    EECHO_PREFIX="$(tput bold)$(tput setaf 2)>>>$(tput sgr0)$(tput bold)$(tput setaf 7)"
-    EECHO_SUFFIX="$(tput sgr0)"
-    EERROR_PREFIX="$(tput bold)$(tput setaf 1)!!!$(tput sgr0)$(tput bold)$(tput setaf 7)"
+    EINFO_PREFIX="$(tput bold)$(tput setaf 2)>>>$(tput sgr0)$(tput bold)"
+    EINFO_SUFFIX="$(tput sgr0)"
+    EERROR_PREFIX="$(tput bold)$(tput setaf 1)!!!$(tput sgr0)$(tput bold)"
     EERROR_SUFFIX="$(tput sgr0)"
 fi
 
 # print normal message in the way it can be easily spotted in console
-eecho() {
-    echo "$EECHO_PREFIX" "$@" "$EECHO_SUFFIX"
+einfo() {
+    echo "$EINFO_PREFIX" "$@" "$EINFO_SUFFIX"
 }
 
 # print error message in the way it can be easily spotted in console
@@ -37,54 +43,35 @@ eerror() {
     >&2 echo "$EERROR_PREFIX" "$@" "$EERROR_SUFFIX"
 }
 
-# find device from the list and try to resolve symlinks
-find_device() {
-    local list="$*"
-    local dev
-    for dev in $list; do
-        if [ -e "$dev" ]; then
-            realpath "$dev"
-            return 0
-        fi
-    done
-    return 1
+# same as einfo but doesn't finish message
+ebegin() {
+    echo -n "$EINFO_PREFIX" "$@"
 }
 
-# default boot disk where we would like to get linux installed to
-find_pri_disk() {
-    find_device /dev/sda /dev/xvda /dev/nvme0n1
+# finalizes opened ebegin
+eend() {
+    echo "" "$@" "$EINFO_SUFFIX"
 }
 
-# aux disk, where we temporarily stage linux before copying it ot primary disk
-find_aux_disk() {
-    find_device /dev/sdb /dev/xvdb /dev/nvme1n1
-}
-
-# build disk, where we keep large temporarily, like linux kernel build directory
-# find_build_disk() {
-#     find_device /dev/sdc /dev/xvdc /dev/nvme2n1
-# }
-
-# append partition number to device disk name
-append_disk_part() {
-    local dev="$1"
-    local part="$2"
-    if echo "$dev" | grep -q '[0-9]$'; then
-        echo "${dev}p${part}"
-    else
-        echo "${dev}${part}"
-    fi
-}
-
-# print command in human readable form with option to paste in terminal and run
+# print command in human readable form with an option to just paste in terminal and run
 ecmd() {
     local cmd
+
+    # short path if `sh -c ...` syntax is being used
+    if [ "$1" = "sh" ] && [ "$2" = "-c" ]; then
+        echo "$3"
+        return
+    fi
+
     local arg
     local line_count
-
     for arg in "$@"; do
         line_count="$(echo "$arg" | wc -l)"
-        if [ "$line_count" -gt 1 ] || echo "$arg" | grep -q '["`$\\[:space:]]'; then
+
+        if [ "$line_count" -gt 1 ] \
+            || [ "$arg" = "" ] \
+            || echo "$arg" | grep -q '["`$\\[:space:]]'
+        then
             cmd="$cmd \"$(echo "$arg" | sed -e 's/\(["`$\\]\)/\\\1/g')\""
         else
             cmd="$cmd $arg"
@@ -96,7 +83,7 @@ ecmd() {
 
 # quietly execute the process, ignore errors
 eqexec() {
-    eecho "exec: $(ecmd "$@")"
+    einfo "exec: $(ecmd "$@")"
     if [ "$ELIB_VERBOSE" = "true" ]; then
         "$@" || true
     else
@@ -106,7 +93,7 @@ eqexec() {
 
 # execute the process and print details about execution
 eexec() {
-    eecho "exec: $(ecmd "$@")"
+    einfo "exec: $(ecmd "$@")"
     local error_code=0
     local output_file
     if [ "$ELIB_VERBOSE" = "true" ]; then

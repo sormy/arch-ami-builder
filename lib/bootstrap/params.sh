@@ -11,12 +11,16 @@ AWS_REGION="$AWS_REGION"
 
 # A name prefix for the new image.
 # Optional, default is Arch Linux {arch}
-# Constraints: 3-100 alphanumeric characters, parentheses (()), square brackets ([]), spaces ( ), periods (.), slashes (/), dashes (-), single quotes ('), at-signs (@), or underscores(_)
+# Constraints: 3-100 alphanumeric characters, parentheses (()),
+# square brackets ([]), spaces ( ), periods (.), slashes (/), dashes (-),
+# single quotes ('), at-signs (@), or underscores(_)
 AMI_NAME_PREFIX="$AMI_NAME_PREFIX"
 
 # A name for the new image.
 # Optional, default is {API_NAME_PREFIX} {YYYY-MM-DD} {timestamp}.
-# Constraints: 3-128 alphanumeric characters, parentheses (()), square brackets ([]), spaces ( ), periods (.), slashes (/), dashes (-), single quotes ('), at-signs (@), or underscores(_)
+# Constraints: 3-128 alphanumeric characters, parentheses (()),
+# square brackets ([]), spaces ( ), periods (.), slashes (/), dashes (-),
+# single quotes ('), at-signs (@), or underscores(_)
 AMI_NAME="$AMI_NAME"
 
 # Wait for key press before invoking every phase.
@@ -33,3 +37,8 @@ ELIB_VERBOSE="$ELIB_VERBOSE"
 # Default value is "auto" - it tries to detect if shell supports colors.
 # Constraints: true | false | auto
 ELIB_COLORS="$ELIB_COLORS"
+
+# Sideload EC2 path.
+# Default value is /opt/arch-bootstrap
+# Constraints: any valid unix full path where bootstrap scripts are located
+SIDELOAD_EC2_PATH="$SIDELOAD_EC2_PATH"

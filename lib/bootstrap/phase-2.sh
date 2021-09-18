@@ -4,6 +4,7 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
 # kernel config to use as base
 KERNEL_CONFIG=$(find /opt/kernels -type f -name "config-*.amzn*" | head -n 1)
@@ -149,7 +150,7 @@ eexec pacman -S --noconfirm grub-efi-aarch64
 # 3. systemd is explicitly set as init as it might be not set on kernel config level
 eexec sh -c 'cat >> /etc/default/grub << END
 
-# added by archlinux-ami-builder
+# added by arch-ami-builder
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=0
 GRUB_TERMINAL="console serial"

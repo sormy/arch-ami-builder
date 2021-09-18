@@ -4,8 +4,9 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
-AMI_NAME_PREFIX="${AMI_NAME_PREFIX:-Arch Linux $(uname -m)}"
+AMI_NAME_PREFIX="${AMI_NAME_PREFIX:-Arch Linux ($(uname -m))}"
 echo "AMI_NAME_PREFIX=$AMI_NAME_PREFIX"
 
 AMI_NAME="${AMI_NAME:-$AMI_NAME_PREFIX $(date +"%Y-%m-%d %s")}"
@@ -57,6 +58,8 @@ eexec aws-curl --ec2-creds \
     --data "NoReboot=true" \
     --data "BlockDeviceMapping.1.DeviceName=/dev/sdb" \
     --data "BlockDeviceMapping.1.NoDevice=" \
+    --data "BlockDeviceMapping.2.DeviceName=/dev/xvdb" \
+    --data "BlockDeviceMapping.2.NoDevice=" \
     "https://ec2.$AWS_REGION.amazonaws.com"
 
 # TODO: Remove old images assuming that this request will be successfull

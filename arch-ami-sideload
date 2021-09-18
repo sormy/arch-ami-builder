@@ -2,50 +2,55 @@
 
 # sideload configuration
 SIDELOAD_TARGET="$1"
-SIDELOAD_PATH="${SIDELOAD_PATH:-/opt/arch-bootstrap}"
-SIDELOAD_CLEAN="${SIDELOAD_CLEAN:-false}"
+SIDELOAD_EC2_PATH="${SIDELOAD_EC2_PATH:-/opt/arch-bootstrap}"
+SIDELOAD_EC2_CLEAN="${SIDELOAD_EC2_CLEAN:-false}"
 
 # bootstrap configuration
 export AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 export PHASE_PROMPT="${PHASE_PROMPT:-false}"
 export ELIB_VERBOSE="${ELIB_VERBOSE:-true}"
 export ELIB_COLORS="${ELIB_COLORS:-true}"
+export SIDELOAD_EC2_PATH
 
 # help screen
 if [ -z "$SIDELOAD_TARGET" ]; then
     >&2 echo "usage: $(basename "$0") <ec2-user@hostname>"
-    >&2 echo "  sideload env: SIDELOAD_PATH (default $SIDELOAD_PATH)"
-    >&2 echo "  sideload env: SIDELOAD_CLEAN (default $SIDELOAD_CLEAN)"
-    >&2 echo "  bootstrap env: AWS_REGION (default $AWS_REGION)"
-    >&2 echo "  bootstrap env: PHASE_PROMPT (default $PHASE_PROMPT)"
-    >&2 echo "  bootstrap env: ELIB_VERBOSE (default $ELIB_VERBOSE)"
-    >&2 echo "  bootstrap env: ELIB_COLORS (default $ELIB_COLORS)"
+    >&2 echo "environment variables:"
+    >&2 echo "  SIDELOAD_EC2_PATH (sideload/bootstrap, default $SIDELOAD_EC2_PATH)"
+    >&2 echo "  SIDELOAD_EC2_CLEAN (sideload only, default $SIDELOAD_EC2_CLEAN)"
+    >&2 echo "  AWS_REGION (bootstrap only, default $AWS_REGION)"
+    >&2 echo "  PHASE_PROMPT (bootstrap only, default $PHASE_PROMPT)"
+    >&2 echo "  ELIB_VERBOSE (bootstrap only, default $ELIB_VERBOSE)"
+    >&2 echo "  ELIB_COLORS (bootstrap only, default $ELIB_COLORS)"
     >&2 echo "  see more details in lib/bootstrap/params.sh"
     exit 1
 fi
 
-echo "Sideloading files to $SIDELOAD_TARGET:$SIDELOAD_PATH ..."
+echo "Sideloading files to $SIDELOAD_TARGET:$SIDELOAD_EC2_PATH ..."
 echo
 
 # cleaning if enabled
-if [ "$SIDELOAD_CLEAN" = "true" ]; then
-    ssh "$SIDELOAD_TARGET" "sudo sh -c 'rm -rf $SIDELOAD_PATH'"
+if [ "$SIDELOAD_EC2_CLEAN" = "true" ]; then
+    ssh "$SIDELOAD_TARGET" "sudo sh -c 'rm -rf $SIDELOAD_EC2_PATH'"
 fi
 
 # creating a directory and fixing permissions
-ssh "$SIDELOAD_TARGET" "sudo sh -c 'mkdir -p $SIDELOAD_PATH; chmod -R a+rwX $SIDELOAD_PATH;'"
+ssh "$SIDELOAD_TARGET" "sudo sh -c 'mkdir -p $SIDELOAD_EC2_PATH; chmod -R a+rwX $SIDELOAD_EC2_PATH;'"
 
 # copying bootstrap scripts
-scp lib/bootstrap/* "$SIDELOAD_TARGET:$SIDELOAD_PATH"
+scp lib/bootstrap/* "$SIDELOAD_TARGET:$SIDELOAD_EC2_PATH"
 
 # making bootstrap scripts executable
-ssh "$SIDELOAD_TARGET" "sudo chmod +x $SIDELOAD_PATH/bootstrap.sh $SIDELOAD_PATH/phase-*.sh"
+ssh "$SIDELOAD_TARGET" "sudo chmod +x $SIDELOAD_EC2_PATH/bootstrap.sh $SIDELOAD_EC2_PATH/phase-*.sh"
 
 # copying params
 TEMP_PARAM_FILE="$(mktemp)"
 envsubst < lib/bootstrap/params.sh > "$TEMP_PARAM_FILE"
-scp "$TEMP_PARAM_FILE" "$SIDELOAD_TARGET:$SIDELOAD_PATH/params.sh"
+scp "$TEMP_PARAM_FILE" "$SIDELOAD_TARGET:$SIDELOAD_EC2_PATH/params.sh"
 rm -f "$TEMP_PARAM_FILE"
+
+# extract just host from target
+SIDELOAD_HOST="${SIDELOAD_TARGET/*@/}"
 
 echo
 echo "Sideloading is completed."
@@ -60,8 +65,8 @@ echo "6. Instance has attached IAM policy with these permissions:"
 cat lib/config/ec2-policy.json
 echo
 echo "Invoke bootstrap before reboot (before phase 3):"
-echo "  ssh -t ec2-user@${SIDELOAD_TARGET/*@/} sudo $SIDELOAD_PATH/bootstrap.sh"
+echo "  ssh -t ec2-user@$SIDELOAD_HOST sudo $SIDELOAD_EC2_PATH/bootstrap.sh"
 echo
 echo "Invoke bootstrap after reboot (after phase 3):"
-echo "  ssh -t alarm@${SIDELOAD_TARGET/*@/} sudo $SIDELOAD_PATH/bootstrap.sh"
+echo "  ssh -t alarm@$SIDELOAD_HOST sudo $SIDELOAD_EC2_PATH/bootstrap.sh"
 echo

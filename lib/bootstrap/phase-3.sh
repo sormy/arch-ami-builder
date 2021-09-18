@@ -4,6 +4,7 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
 # aux disk, root patition, UUID
 AUX_DISK_ROOT_UUID=$(blkid | grep aux-root | grep -o '\bUUID="[^"]*"' | sed -e 's!"!!g')

@@ -4,6 +4,7 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
 # primary disk
 PRI_DISK=$(find_pri_disk)

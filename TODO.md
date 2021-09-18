@@ -19,7 +19,7 @@ resize2fs -M "$PRI_DISK_ROOT"
 resize2fs "$PRI_DISK_ROOT"
 ```
 
-Add these user phases:
+5. Add these user phases:
 
 ```sh
 SIDELOAD_USER_INSTALL="${SIDELOAD_USER_INSTALL}"
@@ -28,7 +28,7 @@ SIDELOAD_USER_CLEAN="${SIDELOAD_USER_CLEAN}"
 SIDELOAD_USER_IMAGE="${SIDELOAD_USER_IMAGE}"
 ```
 
-Resize on boot (update ec2-init?):
+6. Resize on boot (update ec2-init?):
 
 ```sh
 ROOT_PART=$(cat /proc/mounts | grep " / " | cut -d ' ' -f 1)
@@ -39,3 +39,7 @@ sfdisk --dump /dev/nvme0n1 \
 partx -u /dev/nvme0n1
 resize2fs -f /dev/nvme0n1p1
 ```
+
+7. [x] set ELIB_VERBOSE=false for ssh mode ???
+
+8. Make final phase of ec2-init provisioning to print to serial as well

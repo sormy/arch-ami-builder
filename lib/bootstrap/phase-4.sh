@@ -4,6 +4,7 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
 # TODO: run hook SIDELOAD_USER_TEST
 
@@ -30,20 +31,27 @@ eqexec umount /mnt/arch/dev/shm \
     /mnt/arch/boot/efi \
     /mnt/arch
 
-# migrating root partition from aux to primary disk
-# (we need to kill journald to remount as read-only)
+# try to kill journald related processes that could block disk for write
+# TODO: for ec2-init provisioning we should not try to stop journald to keep
+# logs pushed to standard serial console, anyway disk will be blocked
 eqexec systemctl stop systemd-journald.socket
 eqexec systemctl stop systemd-journald-dev-log.socket
 eqexec systemctl stop systemd-journald-audit.socket
 eqexec systemctl stop systemd-journald.service
-eexec mount -o remount,ro /
+
+# migrating root partition from aux to primary disk
+# try to remount read-only if possible, if not then okay, will try to fix fs later
+eqexec mount -o remount,ro /
 eexec sync
 eexec dd "if=$AUX_DISK_ROOT" "of=$PRI_DISK_ROOT" bs=1M status=progress
 eexec sync
-eexec mount -o remount,rw /
+eqexec mount -o remount,rw /
+
+# fixing root partition errors (if remount as read-only has failed)
+# NOTE: if fs is fixed, then this command can return non-zero status
+eqexec e2fsck -fy "$PRI_DISK_ROOT"
 
 # fixing root partition identity
-eexec e2fsck -fy "$PRI_DISK_ROOT"
 eexec tune2fs -U random "$PRI_DISK_ROOT"
 eexec e2label "$PRI_DISK_ROOT" "/"
 
@@ -84,7 +92,7 @@ eqexec sh -c 'find /mnt/arch/var/log/journal -mindepth 1 -maxdepth 1 | xargs rm 
 
 # cleaning filesystem
 eqexec rm -rfv \
-    /mnt/arch/opt/arch-bootstrap \
+    "/mnt/arch$SIDELOAD_EC2_PATH" \
     /mnt/arch/opt/build \
     /mnt/arch/var/lib/ec2-init.* \
     /mnt/arch/var/log/ec2-init.* \

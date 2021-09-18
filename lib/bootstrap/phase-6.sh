@@ -4,6 +4,7 @@ set -e
 
 source "params.sh"
 source "elib.sh"
+source "disk.sh"
 
 INSTANCE_ID=$(curl --silent --max-time 5 --fail http://169.254.169.254/latest/meta-data/instance-id)
 echo "INSTANCE_ID=$INSTANCE_ID"

@@ -1,0 +1,455 @@
+#!/bin/bash
+
+set -e
+
+source lib/bootstrap/elib.sh
+source lib/builder/aws.sh
+source lib/builder/app.sh
+
+################################################################################
+
+APP_VERSION="1.0.1"
+
+PROVISION_MODE="${PROVISION_MODE:-ssh}"
+
+AWS_ACCOUNT=""
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+
+EC2_ARCH="${EC2_ARCH:-arm64}"
+EC2_AMZN2_IMAGE_ID="${EC2_AMZN2_IMAGE_ID:-}"
+EC2_AMZN2_SNAPSHOT_ID=""
+EC2_INSTANCE_TYPE="${EC2_INSTANCE_TYPE:-}"
+EC2_VOLUME_SIZE="${EC2_VOLUME_SIZE:-15}"
+EC2_VOLUME_TYPE="${EC2_VOLUME_TYPE:-gp2}"
+EC2_KEEP_AUX_DISK="${EC2_KEEP_AUX_DISK:-false}"
+EC2_KEY_PAIR="${EC2_KEY_PAIR:-}"
+EC2_SECURITY_GROUP="${EC2_SECURITY_GROUP:-arch-ami-builder}"
+EC2_ROLE="${EC2_ROLE:-arch-ami-builder}"
+EC2_CLEANUP="${EC2_CLEANUP:-true}"
+
+SIDELOAD_S3_PATH=${SIDELOAD_S3_PATH:-}
+SIDELOAD_S3_BUCKET=""
+
+SIDELOAD_EC2_PATH="${SIDELOAD_EC2_PATH:-/opt/arch-bootstrap}"
+SIDELOAD_EC2_CLEAN="${SIDELOAD_EC2_CLEAN:-false}"
+
+EC2_DEVICE_MAPPING=""
+EC2_USER_DATA=""
+EC2_EXTRA_ARGS=()
+EC2_INSTANCE_ID=""
+EC2_PUBLIC_IP=""
+
+START_TS=""
+
+EC2_SECURITY_GROUP_INGRESS_PORTS="22"
+
+EC2_AMZN2_USER="ec2-user"
+EC2_ARCH_USER="alarm"
+
+SSH_OPTS="-o ConnectTimeout=5 \
+          -o KbdInteractiveAuthentication=no \
+          -o ChallengeResponseAuthentication=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o StrictHostKeyChecking=no \
+          -o LogLevel=error \
+          -o ServerAliveInterval=60 \
+          -o ServerAliveCountMax=3"
+
+SSH_CHECK_INTERVAL="5"
+SSH_CHECK_MAX_ATTEMPTS="15"
+
+EC2_CHECK_INTERVAL="5"
+EC2_CHECK_MAX_ATTEMPTS="15"
+
+IAM_INSTANCE_PROFILE_WAIT="10"
+
+################################################################################
+# Helper functions below are referencing global variables defined in this file.
+################################################################################
+
+app_dump_provision_params() {
+    einfo "Provision Parameters:"
+
+    echo "PROVISION_MODE=\"$PROVISION_MODE\""
+
+    echo "AWS_ACCOUNT=\"$AWS_ACCOUNT\""
+    echo "AWS_REGION=\"$AWS_REGION\""
+
+    echo "EC2_ARCH=\"$EC2_ARCH\""
+    echo "EC2_AMZN2_IMAGE_ID=\"$EC2_AMZN2_IMAGE_ID\""
+    echo "EC2_AMZN2_SNAPSHOT_ID=\"$EC2_AMZN2_SNAPSHOT_ID\""
+    echo "EC2_INSTANCE_TYPE=\"$EC2_INSTANCE_TYPE\""
+    echo "EC2_VOLUME_SIZE=\"$EC2_VOLUME_SIZE\""
+    echo "EC2_VOLUME_TYPE=\"$EC2_VOLUME_TYPE\""
+    echo "EC2_KEEP_AUX_DISK=\"$EC2_KEEP_AUX_DISK\""
+    echo "EC2_KEY_PAIR=\"$EC2_KEY_PAIR\""
+    echo "EC2_SECURITY_GROUP=\"$EC2_SECURITY_GROUP\""
+    echo "EC2_ROLE=\"$EC2_ROLE\""
+    echo "EC2_CLEANUP=\"$EC2_CLEANUP\""
+
+    echo "SIDELOAD_EC2_PATH=\"$SIDELOAD_EC2_PATH\""
+
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        echo "SIDELOAD_S3_PATH=\"$SIDELOAD_S3_PATH\""
+        echo "SIDELOAD_S3_BUCKET=\"$SIDELOAD_S3_BUCKET\""
+    else
+        echo "SIDELOAD_EC2_CLEAN=\"$SIDELOAD_EC2_CLEAN\""
+    fi
+}
+
+app_export_bootstrap_params() {
+    # this causes local variables below to be used by bootstrap on instance itself as well
+    export AWS_REGION
+    export ELIB_COLORS
+    export SIDELOAD_EC2_PATH
+}
+
+app_dump_bootstrap_params() {
+    einfo "Bootstrap Parameters:"
+    print_bootstrap_params
+}
+
+app_cleanup_trap() {
+    if [ "$EC2_CLEANUP" = "true" ] \
+        && [ "$PROVISION_MODE" = "ec2-init" ] \
+        && [ -n "$EC2_INSTANCE_ID" ] \
+        && [ "$(aws_ec2_instance_state "$EC2_INSTANCE_ID")" = "running" ]
+    then
+        einfo "Terminating EC2 instance ..."
+        aws_ec2_terminate_instance "$EC2_INSTANCE_ID"
+    fi
+}
+
+app_error_trap() {
+    local error_code="$1"
+    eerror "The process has failed at line $(caller) ($error_code)"
+}
+
+app_check_ec2_arch() {
+    if [ "$EC2_ARCH" != "arm64" ]; then
+        >&2 echo "Invalid EC2_ARCH value $EC2_ARCH: only arm64 is supported at this time"
+        exit 1
+    fi
+}
+
+app_check_ec2_key_pair() {
+    if [ "$PROVISION_MODE" = "ssh" ] && [ -z "$EC2_KEY_PAIR" ]; then
+        >&2 echo "EC2_KEY_PAIR is required to provision over SSH"
+        exit 1
+    fi
+}
+
+app_check_provision_mode() {
+    if [ "$PROVISION_MODE" != "ssh" ] && [ "$PROVISION_MODE" != "ec2-init" ]; then
+        >&2 echo "Invalid PROVISION_MODE value $PROVISION_MODE: only ssh and ec2-init are supported"
+        exit 1
+    fi
+}
+
+app_check_sideload_s3_path() {
+    if [ "$PROVISION_MODE" == "ec2-init" ] \
+        && [ -n "$SIDELOAD_S3_PATH" ] \
+        && ! (echo "$SIDELOAD_S3_PATH" | grep -q '^s3://')
+    then
+        >&2 echo "Invalid SIDELOAD_S3_PATH value $SIDELOAD_S3_PATH: must have s3:// prefix"
+        exit 1
+    fi
+}
+
+app_prepare_aws_account() {
+    ebegin "Discovering AWS account number ..."
+    AWS_ACCOUNT=$(aws_sts_caller_account)
+    eend "$AWS_ACCOUNT"
+}
+
+app_prepare_ec2_amzn2_image_id() {
+    if [ -z "$EC2_AMZN2_IMAGE_ID" ]; then
+        ebegin "Discovering last Amazon Linux 2 image for architecture $EC2_ARCH ..."
+        EC2_AMZN2_IMAGE_ID=$(aws_ec2_amzn2_image_id "$EC2_ARCH")
+        eend "$EC2_AMZN2_IMAGE_ID"
+    fi
+}
+
+app_prepare_ec2_amzn2_snapshot_id() {
+    ebegin "Discovering Amazon Linux 2 image snapshot ID ..."
+    EC2_AMZN2_SNAPSHOT_ID=$(aws_ec2_image_snapshot_id "$EC2_AMZN2_IMAGE_ID")
+    eend "$EC2_AMZN2_SNAPSHOT_ID"
+}
+
+app_prepare_ec2_instance_type() {
+    if [ -z "$EC2_INSTANCE_TYPE" ]; then
+        if [ "$EC2_ARCH" = "arm64" ]; then
+            EC2_INSTANCE_TYPE="t4g.micro"
+        else
+            EC2_INSTANCE_TYPE="t3.micro"
+        fi
+    fi
+}
+
+app_prepare_sideload_s3_path() {
+    if [ "$PROVISION_MODE" = "ec2-init" ] && [ -z "$SIDELOAD_S3_PATH" ]; then
+        SIDELOAD_S3_PATH="s3://arch-ami-builder-$AWS_ACCOUNT-$AWS_REGION"
+    fi
+}
+
+app_prepare_sideload_s3_bucket() {
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        SIDELOAD_S3_BUCKET="$(aws_s3_bucket_name "$SIDELOAD_S3_PATH")"
+    fi
+}
+
+app_create_ec2_security_group() {
+    einfo "Checking if security group \"$EC2_SECURITY_GROUP\" exists ..."
+
+    if aws_ec2_security_group_exists "$EC2_SECURITY_GROUP"; then
+        einfo "Removing existing security group \"$EC2_SECURITY_GROUP\" ..."
+        aws_ec2_delete_security_group "$EC2_SECURITY_GROUP"
+    fi
+
+    einfo "Creating security group \"$EC2_SECURITY_GROUP\" ..."
+    aws_ec2_create_security_group "$EC2_SECURITY_GROUP" "$EC2_SECURITY_GROUP_INGRESS_PORTS"
+}
+
+app_create_ec2_role_and_instance_profile() {
+    einfo "Checking if IAM instance profile \"$EC2_ROLE\" exists ..."
+
+    if aws_iam_instance_profile_exists "$EC2_ROLE"; then
+        einfo "Removing existing IAM instance profile \"$EC2_ROLE\" ..."
+        aws_iam_delete_instance_profile "$EC2_ROLE" "$EC2_ROLE"
+    fi
+
+    einfo "Checking if IAM role \"$EC2_ROLE\" exists ..."
+
+    if aws_iam_role_exists "$EC2_ROLE"; then
+        einfo "Removing existing IAM role \"$EC2_ROLE\" ..."
+        aws_iam_delete_role "$EC2_ROLE"
+    fi
+
+    einfo "Creating IAM role \"$EC2_ROLE\" ..."
+
+    EC2_ASSUME_POLICY_FILE="lib/config/ec2-assume-policy.json"
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        EC2_POLICY_FILE="lib/config/ec2-policy-with-s3.json"
+    else
+        EC2_POLICY_FILE="lib/config/ec2-policy.json"
+    fi
+
+    EC2_ASSUME_POLICY="$(< $EC2_ASSUME_POLICY_FILE)"
+    EC2_POLICY="$(sed 's!%BUCKET_NAME%!'"$SIDELOAD_S3_BUCKET"'!g' < $EC2_POLICY_FILE)"
+
+    echo "EC2_ASSUME_POLICY=$EC2_ASSUME_POLICY"
+    echo "EC2_POLICY=$EC2_POLICY"
+
+    aws_iam_create_role "$EC2_ROLE" "$EC2_ASSUME_POLICY" "$EC2_POLICY"
+
+    einfo "Creating IAM instance profile \"$EC2_ROLE\" ..."
+    aws_iam_create_instance_profile "$EC2_ROLE" "$EC2_ROLE"
+
+    einfo "Waiting for IAM instance profile to be available ..."
+    sleep "$IAM_INSTANCE_PROFILE_WAIT"
+}
+
+app_create_sideload_s3_bucket() {
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        einfo "Checking if S3 bucket \"$SIDELOAD_S3_BUCKET\" exists ..."
+        if ! aws_s3_bucket_exists "$SIDELOAD_S3_BUCKET"; then
+            einfo "Creating S3 bucket \"$SIDELOAD_S3_BUCKET\" ..."
+            aws_s3_create_bucket "$SIDELOAD_S3_BUCKET"
+        fi
+    fi
+}
+
+app_create_ec2_device_mapping() {
+    EC2_DEVICE_MAPPING=$(create_ec2_device_mapping "$EC2_AMZN2_SNAPSHOT_ID" \
+                        "$EC2_VOLUME_SIZE" "$EC2_VOLUME_TYPE" "$EC2_KEEP_AUX_DISK")
+    einfo "Using EC2 block device mapping configuration:"
+    echo "$EC2_DEVICE_MAPPING"
+}
+
+app_create_ec2_user_data() {
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        EC2_USER_DATA=$(create_ec2_user_data "$SIDELOAD_S3_PATH" "$SIDELOAD_EC2_PATH")
+        einfo "Using EC2 user data configuration:"
+        echo "$EC2_USER_DATA"
+    fi
+}
+
+app_create_ec2_key_pair_args() {
+    if [ -n "$EC2_KEY_PAIR" ]; then
+        EC2_EXTRA_ARGS+=(--key-name "$EC2_KEY_PAIR")
+    fi
+}
+
+app_create_ec2_cpu_credits_args() {
+    # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-unlimited-mode.html
+    if echo "$EC2_INSTANCE_TYPE" | grep -q '^t2'; then
+        EC2_EXTRA_ARGS+=(--credit-specification "CpuCredits=unlimited")
+    fi
+}
+
+app_sideload_bootstrap_scripts_s3() {
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        einfo "Sideloading bootstrap scripts to $SIDELOAD_S3_PATH ..."
+        sideload_bootstrap_scripts_s3 "$SIDELOAD_S3_PATH"
+    fi
+}
+
+app_run_ec2_instance() {
+    einfo "Running bootstrap EC2 instance ..."
+
+    echo "IMAGE_ID=\"$EC2_AMZN2_IMAGE_ID\""
+    echo "INSTANCE_TYPE=\"$EC2_INSTANCE_TYPE\""
+    echo "SECURITY_GROUP=\"$EC2_SECURITY_GROUP\""
+    echo "IAM_ROLE=\"$EC2_ROLE\""
+    echo "BLOCK_DEVICE_MAPPING=\"$EC2_DEVICE_MAPPING\""
+    echo "EXTRA_ARGS=\"${EC2_EXTRA_ARGS[*]}\""
+    echo -e "USER_DATA=\n$EC2_USER_DATA"
+
+    EC2_INSTANCE_ID="$(
+        aws_ec2_run_instance \
+            --image-id "$EC2_AMZN2_IMAGE_ID" \
+            --instance-type "$EC2_INSTANCE_TYPE" \
+            --security-groups "$EC2_SECURITY_GROUP" \
+            --iam-instance-profile "Name=$EC2_ROLE" \
+            --block-device-mappings "$EC2_DEVICE_MAPPING" \
+            --user-data "$EC2_USER_DATA" \
+            "${EC2_EXTRA_ARGS[@]}" \
+    )"
+}
+
+app_run_provisioning() {
+    if [ "$PROVISION_MODE" = "ec2-init" ]; then
+        app_run_provisioning_ec2
+    else
+        app_run_provisioning_ssh
+    fi
+}
+
+app_run_provisioning_ec2() {
+    einfo "The rest of the bootstrap process will be continued on the instance itself."
+    einfo "Use EC2 serial console access in AWS console to track the progress on initial phase."
+    einfo "Use ssh access to track progress on final phase (requires key pair):"
+    einfo "  ssh alarm@<hostname> sudo tail -f /var/log/ec2-init.log"
+    einfo "Once the process will complete Arch Linux AMI creation will continue in background and the progress can be tracked in AWS console."
+    einfo "Please ensure that any unneeded AWS resources are cleaned up after the process will complete."
+}
+
+app_run_provisioning_ssh() {
+    einfo "Waiting until instance will be up ..."
+    wait_until_instance_will_be_up "$EC2_INSTANCE_ID" \
+        "$EC2_CHECK_INTERVAL" "$EC2_CHECK_MAX_ATTEMPTS"
+
+    ebegin "Discovering instance public IP address ..."
+    EC2_PUBLIC_IP=$(aws_ec2_instance_public_ip "$EC2_INSTANCE_ID")
+    eend "$EC2_PUBLIC_IP"
+
+    einfo "Waiting until SSH will be up ..."
+    wait_until_ssh_will_be_up "$EC2_AMZN2_USER@$EC2_PUBLIC_IP" \
+        "$SSH_CHECK_INTERVAL" "$SSH_CHECK_MAX_ATTEMPTS"
+
+    einfo "Sideloading bootstrap scripts ..."
+    sideload_bootstrap_scripts_ssh "$SIDELOAD_EC2_PATH" \
+        "$EC2_AMZN2_USER@$EC2_PUBLIC_IP" "$SIDELOAD_EC2_CLEAN"
+
+    # TODO: Ctrl+C is not recognized as an error due to '|| true'
+    einfo "Initiating bootstrap process ..."
+    ssh -t $SSH_OPTS "$EC2_AMZN2_USER@$EC2_PUBLIC_IP" \
+        sudo "$SIDELOAD_EC2_PATH/bootstrap.sh" || true
+
+    einfo "Waiting until SSH will be up ..."
+    wait_until_ssh_will_be_up "$EC2_ARCH_USER@$EC2_PUBLIC_IP" \
+        "$SSH_CHECK_INTERVAL" "$SSH_CHECK_MAX_ATTEMPTS"
+
+    # TODO: Ctrl+C is not recognized as an error due to '|| true'
+    einfo "Continuing bootstrap process ..."
+    ssh -t $SSH_OPTS "$EC2_ARCH_USER@$EC2_PUBLIC_IP" \
+        sudo "$SIDELOAD_EC2_PATH/bootstrap.sh" || true
+
+    einfo "The bootstrap process is completed."
+    einfo "Arch Linux AMI creation should continue in background and the progress can be tracked in AWS console."
+    einfo "Please ensure that any unneeded AWS resources are cleaned up after the process will complete."
+}
+
+app_confirm_provision() {
+    if tty -s; then
+        einfo "Do you want to continue?"
+        press_any_key_to_continue
+    fi
+}
+
+app_time_intro() {
+    START_TS=$(date +%s)
+    einfo "Started at $(date +"%Y-%m-%d %H:%M:%S")"
+}
+
+app_time_outro() {
+    einfo "Done at $(date +"%Y-%m-%d %H:%M:%S")"
+
+    local duration_mins=$(( ($(date +%s) - START_TS) / 60 ))
+    einfo "Process took $duration_mins minute(s)"
+}
+
+app_run() {
+    # cleanup on script crash or termination
+    trap 'app_cleanup_trap' EXIT
+
+    # show details about error
+    trap 'app_error_trap $?' ERR
+
+    # show version of the application
+    einfo "Arch AMI Builder v$APP_VERSION"
+
+    # check if necessary parameters are set and valid
+    app_check_provision_mode
+    app_check_ec2_arch
+    app_check_ec2_key_pair                  # ssh required, optional for ec2-init
+    app_check_sideload_s3_path              # ec2-init only
+
+    # start measuring time
+    app_time_intro
+
+    # read-only discovery and configuration
+    app_prepare_aws_account
+    app_prepare_ec2_amzn2_image_id
+    app_prepare_ec2_amzn2_snapshot_id
+    app_prepare_ec2_instance_type
+    app_prepare_sideload_s3_path            # ec2-init only
+    app_prepare_sideload_s3_bucket          # ec2-init only
+
+    # make configuration available to bootstrap scripts
+    app_export_bootstrap_params
+
+    # dump configuration
+    app_dump_provision_params
+    app_dump_bootstrap_params
+
+    # confirm the operation
+    app_confirm_provision
+
+    # create requires aws resources
+    app_create_ec2_security_group
+    app_create_ec2_role_and_instance_profile
+    app_create_sideload_s3_bucket           # ec2-init only
+
+    # create required parameters to spawn an instance
+    app_create_ec2_device_mapping
+    app_create_ec2_user_data                # ec2-init only
+    app_create_ec2_key_pair_args            # ssh required, optional for ec2-init
+    app_create_ec2_cpu_credits_args         # t* instance types only
+
+    # deploy bootstrap scripts
+    app_sideload_bootstrap_scripts_s3       # ec2-init only
+
+    # run instance
+    app_run_ec2_instance
+
+    # run provisioning
+    app_run_provisioning
+
+    # stop measuring time
+    app_time_outro
+}
+
+################################################################################
+
+app_run
